@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="SummerQuest">
+<meta name="theme-color" content="#FF6B35">
+<title>SummerQuest</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+  import { getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot, arrayUnion, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyABfS_OPe4tITUgNNn2Zfo1Ooqjvjw4zro",
+    authDomain: "summerquest-d4d85.firebaseapp.com",
+    projectId: "summerquest-d4d85",
+    storageBucket: "summerquest-d4d85.firebasestorage.app",
+    messagingSenderId: "934240649535",
+    appId: "1:934240649535:web:af828011c71d7d7b4e938a"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+
+  // ====== STATE ======
+  let S = {
+    gameCode: null,
+    myName: null,
+    isCreator: false,
+    currentQuestId: null,
+    activeTab: 'quests',
+    unsubscribe: null,
+    game: null,
+  };
+
+  // ====== HELPERS ======
+  function toast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(t._t);
+    t._t = setTimeout(() => t.classList.remove('show'), 2800);
+  }
+
+  function go(screenId) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(screenId).classList.add('active');
+  }
+
+  function genCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    return Array.from({length: 6}, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  }
+
+  function initials(name) { return (name || '?')[0].toUpperCase(); }
+
+  // ====== FIRESTORE ======
+  async function getGame() { return S.game; }
+
+  async function saveGame(data) {
+    await setDoc(doc(db, 'games', S.gameCode), data);
+  }
+
+  async function updateGame(data) {
+    await updateDoc(doc(db, 'games', S.gameCode), data);
+  }
+
+  function subscribeGame() {
+    if (S.unsubscribe) S.unsubscribe();
+    S.unsubscribe = onSnapshot(doc(db, 'games', S.gameCode), snap => {
+      if (!snap.exists()) return;
+      S.game = snap.data();
+      refreshUI();
+    });
+  }
+
+  function refreshUI() {
+    if (S.activeTab === 'quests') renderQuests();
+    else if (S.activeTab === 'chat') renderChat();
+    else if (S.activeTab === 'leaderboard') renderLeaderboard();
+    else if (S.activeTab === 'profiles') renderProfiles();
+    // Chat dot
+    const game = S.game;
+    if (game && S.activeTab !== 'chat') {
+      const msgs = game.messages || [];
+      const lastSeen = S.lastSeenMsg || 0;
+      if (msgs.length > lastSeen) document.getElementById('chat-dot').classList.add('visible');
+    }
+  }
+
+  // ====== NAV ======
+  window.switchTab = function(tab) {
+    S.activeTab = tab;
+    document.querySelectorAll('.tab-view').forEach(v => v.style.display = 'none');
+    const el = document.getElementById('tab-' + tab);
+    if (el) { el.style.display = 'flex'; el.style.flexDirection = 'column'; el.style.height = '100%'; }
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    const navEl = document.getElementById('nav-' + tab);
+    if (navEl) navEl.classList.add('active');
+    if (tab === 'quests') renderQuests();
+    if (tab === 'chat') { S.lastSeenMsg = (S.game?.messages || []).length; document.getElementById('chat-dot').classList.remove('visible'); renderChat(); }
+    if (tab === 'leaderboard') renderLeaderboard();
+    if (tab === 'profiles') renderProfiles();
+  }
+
+  window.go = go;
+
+  // ====== SESSION PERSISTENCE ======
+  function saveSession() {
+    try {
+      localStorage.setItem('sq_session', JSON.stringify({ gameCode: S.gameCode, myName: S.myName, isCreator: S.isCreator }));
+    } catch(e) {}
+  }
+  function loadSession() {
+    try {
+      const raw = localStorage.getItem('sq_session');
+      return raw ? JSON.parse(raw) : null;
+    } catch(e) { return null; }
+  }
+  function clearSession() {
+    try { localStorage.removeItem('sq_session'); } catch(e) {}
+  }
+
+  // ====== SPLASH ======
+  window.addEventListener('load', async () => {
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+    document.querySelectorAll('.tab-view').forEach((v, i) => {
+      v.style.display = i === 0 ? 'flex' : 'none';
+      v.style.flexDirection = 'column';
+      v.style.height = '100%';
+    });
+    await new Promise(r => setTimeout(r, 1800));
+
+    // Try to restore previous session
+    const session = loadSession();
+    if (session && session.gameCode && session.myName) {
+      try {
+        const snap = await getDoc(doc(db, 'games', session.gameCode));
+        if (snap.exists()) {
+          const game = snap.data();
+          if (game.players && game.players[session.myName]) {
+            S = { ...S, gameCode: session.gameCode, myName: session.myName, isCreator: session.isCreator, currentQuestId: null, activeTab: 'quests', lastSeenMsg: 0 };
+            enterGame(game);
+            return;
+          }
+        }
+      } catch(e) { console.error(e); }
+      clearSession();
+    }
+    go('screen-home');
+  });
+
+  // ====== CREATE ======
+  window.createGame = async function() {
+    const name = document.getElementById('c-gamename').value.trim();
+    const user = document.getElementById('c-username').value.trim();
+    if (!name || !user) { toast('Remplis tous les champs 😊'); return; }
+    const code = genCode();
+    const game = {
+      code, name, creator: user,
+      players: { [user]: { name: user, score: 0, questsDone: 0, joinedAt: Date.now() } },
+      quests: [],
+      submissions: [],
+      messages: [],
+      createdAt: Date.now()
+    };
+    try {
+      S = { ...S, gameCode: code, myName: user, isCreator: true, currentQuestId: null, activeTab: 'quests', lastSeenMsg: 0 };
+      await saveGame(game);
+      saveSession();
+      enterGame(game);
+    } catch(e) { toast('Erreur de connexion 😕'); console.error(e); }
+  }
+
+  // ====== JOIN ======
+  window.joinGame = async function() {
+    const code = document.getElementById('j-code').value.trim().toUpperCase();
+    const user = document.getElementById('j-username').value.trim();
+    if (!code || !user) { toast('Remplis tous les champs 😊'); return; }
+    try {
+      const snap = await getDoc(doc(db, 'games', code));
+      if (!snap.exists()) { toast('Code introuvable 🤔'); return; }
+      const game = snap.data();
+      if (!game.players[user]) game.players[user] = { name: user, score: 0, questsDone: 0, joinedAt: Date.now() };
+      game.messages = [...(game.messages || []), { id: 'm' + Date.now(), type: 'join', text: user + ' a rejoint la partie ! 🎉', time: Date.now() }];
+      S = { ...S, gameCode: code, myName: user, isCreator: game.creator === user, currentQuestId: null, activeTab: 'quests', lastSeenMsg: game.messages.length };
+      await saveGame(game);
+      saveSession();
+      enterGame(game);
+    } catch(e) { toast('Erreur de connexion 😕'); console.error(e); }
+  }
+
+  // ====== ENTER GAME ======
+  function enterGame(game) {
+    S.game = game;
+    document.getElementById('g-game-title').textContent = game.name;
+    document.getElementById('g-quest-sub').textContent = 'Bonjour ' + S.myName + ' ! 👋';
+    document.getElementById('s-code').textContent = game.code;
+    document.getElementById('s-myname').textContent = S.myName;
+    document.getElementById('s-gamename').textContent = game.name;
+    if (S.isCreator) document.getElementById('admin-fab').classList.add('visible');
+    else document.getElementById('admin-fab').classList.remove('visible');
+    go('screen-game');
+    switchTab('quests');
+    subscribeGame();
+  }
+
+  // ====== QUESTS ======
+  function renderQuests() {
+    const game = S.game;
+    const el = document.getElementById('quests-list');
+    if (!game) return;
+    if (!game.quests || !game.quests.length) {
+      el.innerHTML = `<div class="empty"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#FFD166" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><p>Aucune quête pour l'instant !</p></div>`;
+      return;
+    }
+    const subs = game.submissions || [];
+    const myDoneIds = new Set(subs.filter(s => s.player === S.myName && s.status === 'approved').map(s => s.questId));
+    const myPendingIds = new Set(subs.filter(s => s.player === S.myName && s.status === 'pending').map(s => s.questId));
+    el.innerHTML = game.quests.map(q => {
+      const done = myDoneIds.has(q.id);
+      const pending = myPendingIds.has(q.id);
+      let badge = done ? `<span class="badge badge-done">✓ Validé</span>` : pending ? `<span class="badge badge-pending">En attente</span>` : `<span class="badge badge-pts">${q.pts} pts</span>`;
+      return `<div class="quest-card" onclick="${done||pending ? '' : `openSubmit('${q.id}')`}">
+        <div class="quest-icon-wrap${done?' done':''}">
+          ${done ? `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2E7D32" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`
+          : `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`}
+        </div>
+        <div class="quest-body">
+          <div class="quest-title">${q.title}</div>
+          <div class="quest-desc">${q.desc || 'Relève ce défi !'}</div>
+        </div>
+        <div class="quest-right">${badge}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // ====== ADD QUEST ======
+  window.addQuest = async function() {
+    const title = document.getElementById('a-quest-title').value.trim();
+    const desc = document.getElementById('a-quest-desc').value.trim();
+    const pts = parseInt(document.getElementById('a-quest-pts').value) || 10;
+    if (!title) { toast('Ajoute un titre 😊'); return; }
+    const game = S.game;
+    if (!game) return;
+    game.quests = [...(game.quests||[]), { id: 'q'+Date.now(), title, desc, pts }];
+    game.messages = [...(game.messages||[]), { id:'m'+Date.now(), type:'quest', text:'🆕 Nouvelle quête : '+title+' ('+pts+' pts)', time:Date.now() }];
+    await saveGame(game);
+    document.getElementById('a-quest-title').value = '';
+    document.getElementById('a-quest-desc').value = '';
+    document.getElementById('a-quest-pts').value = '10';
+    toast('Quête ajoutée ! ✨');
+  }
+
+  // ====== SUBMIT PHOTO ======
+  window.openSubmit = function(questId) {
+    S.currentQuestId = questId;
+    document.getElementById('submit-msg').value = '';
+    document.getElementById('preview-img').style.display = 'none';
+    document.getElementById('photo-file').value = '';
+    const q = (S.game?.quests||[]).find(q => q.id === questId);
+    if (q) document.getElementById('submit-modal-title').textContent = q.title;
+    document.getElementById('submit-modal').classList.add('open');
+  }
+
+  window.previewImg = function(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    // Compress image before storing
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX = 800;
+        let w = img.width, h = img.height;
+        if (w > MAX) { h = h * MAX / w; w = MAX; }
+        if (h > MAX) { w = w * MAX / h; h = MAX; }
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        const compressed = canvas.toDataURL('image/jpeg', 0.7);
+        document.getElementById('preview-img').src = compressed;
+        document.getElementById('preview-img').style.display = 'block';
+        document.getElementById('preview-img').dataset.compressed = compressed;
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  window.submitPhoto = async function() {
+    const img = document.getElementById('preview-img');
+    const msg = document.getElementById('submit-msg').value.trim();
+    if (!img.dataset.compressed) { toast('Choisis une photo d\'abord 📸'); return; }
+    const game = S.game;
+    if (!game) return;
+    const q = (game.quests||[]).find(q => q.id === S.currentQuestId);
+    const sub = { id:'s'+Date.now(), questId:S.currentQuestId, player:S.myName, photo:img.dataset.compressed, message:msg, status:'pending', reactions:{}, submittedAt:Date.now() };
+    game.submissions = [...(game.submissions||[]), sub];
+    game.messages = [...(game.messages||[]), { id:'m'+Date.now(), type:'submission', player:S.myName, questTitle:q?q.title:'', photo:img.dataset.compressed, message:msg, reactions:{}, subId:sub.id, time:Date.now() }];
+    await saveGame(game);
+    document.getElementById('submit-modal').classList.remove('open');
+    toast('Photo envoyée ! En attente de validation 🎉');
+  }
+
+  // ====== CHAT ======
+  function renderChat() {
+    const game = S.game;
+    const el = document.getElementById('chat-messages');
+    if (!game || !(game.messages||[]).length) {
+      el.innerHTML = `<div class="empty"><p>Pas encore de messages —<br>dis bonjour ! 👋</p></div>`;
+      return;
+    }
+    el.innerHTML = game.messages.map(m => {
+      if (['join','quest','validated'].includes(m.type)) return `<div class="msg-notif">${m.text}</div>`;
+      const isMe = m.player === S.myName;
+      const timeStr = new Date(m.time).toLocaleTimeString('fr', {hour:'2-digit',minute:'2-digit'});
+      const reactions = m.reactions || {};
+      const reactBtns = ['❤️','😂','🔥','👏','😍'].map(e => {
+        const cnt = reactions[e] ? Object.keys(reactions[e]).length : 0;
+        return `<button class="reaction-btn" onclick="addReaction('${m.id}','${e}')">${e}${cnt>0?` <span class="reaction-count">${cnt}</span>`:''}</button>`;
+      }).join('');
+      if (m.type === 'submission') {
+        return `<div class="msg-row ${isMe?'me':'other'}">
+          ${!isMe?`<div class="msg-avatar">${initials(m.player)}</div>`:''}
+          <div>
+            ${!isMe?`<div class="msg-sender">${m.player}</div>`:''}
+            <div class="msg-bubble">
+              <img src="${m.photo}" class="photo-msg-img">
+              <div style="font-size:12px;font-weight:600;margin-bottom:2px">📸 ${m.questTitle}</div>
+              ${m.message?`<div style="font-size:13px">${m.message}</div>`:''}
+            </div>
+            <div class="reactions-bar">${reactBtns}</div>
+            <div class="msg-time">${timeStr}</div>
+          </div>
+        </div>`;
+      }
+      return `<div class="msg-row ${isMe?'me':'other'}">
+        ${!isMe?`<div class="msg-avatar">${initials(m.player)}</div>`:''}
+        <div>
+          ${!isMe?`<div class="msg-sender">${m.player}</div>`:''}
+          <div class="msg-bubble">${m.text}</div>
+          <div class="msg-time">${timeStr}</div>
+        </div>
+      </div>`;
+    }).join('');
+    const scroll = document.getElementById('chat-scroll');
+    scroll.scrollTop = scroll.scrollHeight;
+  }
+
+  window.sendMsg = async function() {
+    const input = document.getElementById('chat-input');
+    const text = input.value.trim();
+    if (!text || !S.game) return;
+    const game = S.game;
+    game.messages = [...(game.messages||[]), { id:'m'+Date.now(), type:'text', player:S.myName, text, time:Date.now() }];
+    await saveGame(game);
+    input.value = '';
+  }
+
+  window.addReaction = async function(msgId, emoji) {
+    const game = S.game;
+    if (!game) return;
+    const msg = game.messages.find(m => m.id === msgId);
+    if (!msg) return;
+    if (!msg.reactions) msg.reactions = {};
+    if (!msg.reactions[emoji]) msg.reactions[emoji] = {};
+    if (msg.reactions[emoji][S.myName]) delete msg.reactions[emoji][S.myName];
+    else msg.reactions[emoji][S.myName] = true;
+    await saveGame(game);
+  }
+
+  // ====== LEADERBOARD ======
+  function renderLeaderboard() {
+    const game = S.game;
+    const el = document.getElementById('lb-list');
+    if (!game) return;
+    const players = Object.values(game.players||{}).sort((a,b) => b.score-a.score || b.questsDone-a.questsDone);
+    if (!players.length) { el.innerHTML='<div class="empty"><p>Aucun joueur encore</p></div>'; return; }
+    const medals = ['🥇','🥈','🥉'];
+    el.innerHTML = players.map((p,i) => `
+      <div class="lb-row${i===0?' top':''}">
+        <div class="lb-rank">${medals[i]||(i+1)}</div>
+        <div class="lb-avatar">${initials(p.name)}</div>
+        <div class="lb-info">
+          <div class="lb-name">${p.name}${p.name===S.myName?' <span style="font-size:11px;color:var(--sunset-top)">(toi)</span>':''}</div>
+          <div class="lb-sub">${p.questsDone||0} quête${(p.questsDone||0)>1?'s':''} réalisée${(p.questsDone||0)>1?'s':''}</div>
+        </div>
+        <div class="lb-score">${p.score||0} pts</div>
+      </div>`).join('');
+  }
+
+  // ====== PROFILES ======
+  function renderProfiles() {
+    const game = S.game;
+    const el = document.getElementById('profiles-list');
+    if (!game) return;
+    const players = Object.values(game.players||{});
+    el.innerHTML = players.map(p => `
+      <div class="profile-card">
+        <div class="profile-avatar">${initials(p.name)}</div>
+        <div>
+          <div class="profile-name">${p.name}${p.name===S.myName?' (moi)':''}</div>
+          <div class="profile-sub">${p.questsDone||0} quête${(p.questsDone||0)>1?'s':''} · ${p.score||0} pts</div>
+        </div>
+        ${p.name===game.creator?`<span class="badge badge-pts" style="margin-left:auto">Admin</span>`:`<span class="profile-pts">${p.score||0} pts</span>`}
+      </div>`).join('');
+  }
+
+  // ====== ADMIN ======
+  window.openAdminModal = function() {
+    renderAdminSubmissions();
+    document.getElementById('admin-modal').classList.add('open');
+  }
+  window.closeAdminOnBg = function(e) { if(e.target.id==='admin-modal') document.getElementById('admin-modal').classList.remove('open'); }
+  window.closeSubmitOnBg = function(e) { if(e.target.id==='submit-modal') document.getElementById('submit-modal').classList.remove('open'); }
+
+  function renderAdminSubmissions() {
+    const game = S.game;
+    if (!game) return;
+    const pending = (game.submissions||[]).filter(s => s.status==='pending');
+    const titleEl = document.getElementById('admin-submissions-title');
+    const el = document.getElementById('admin-submissions');
+    if (!pending.length) {
+      titleEl.style.display='none';
+      el.innerHTML='<div style="padding:0 16px 16px;color:var(--text-muted);font-size:14px">Aucune soumission en attente 🎉</div>';
+      return;
+    }
+    titleEl.style.display='block';
+    el.innerHTML = pending.map(s => {
+      const q = (game.quests||[]).find(q => q.id===s.questId);
+      return `<div class="review-card">
+        <div class="review-header">
+          <div class="lb-avatar">${initials(s.player)}</div>
+          <div><div style="font-weight:600;font-size:14px">${s.player}</div><div style="font-size:12px;color:var(--text-soft)">${q?q.title:''} · ${q?q.pts:0} pts</div></div>
+        </div>
+        <img src="${s.photo}" class="review-img">
+        ${s.message?`<div style="padding:8px 16px;font-size:13px;color:var(--text-soft)">"${s.message}"</div>`:''}
+        <div class="review-actions">
+          <button class="btn-approve" onclick="reviewSub('${s.id}','approved')">✓ Valider</button>
+          <button class="btn-reject" onclick="reviewSub('${s.id}','rejected')">✗ Refuser</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  window.reviewSub = async function(subId, status) {
+    const game = S.game;
+    if (!game) return;
+    const sub = (game.submissions||[]).find(s => s.id===subId);
+    if (!sub) return;
+    sub.status = status;
+    if (status==='approved') {
+      const q = (game.quests||[]).find(q => q.id===sub.questId);
+      if (q && game.players[sub.player]) {
+        game.players[sub.player].score = (game.players[sub.player].score||0) + q.pts;
+        game.players[sub.player].questsDone = (game.players[sub.player].questsDone||0) + 1;
+      }
+      game.messages = [...(game.messages||[]), { id:'m'+Date.now(), type:'validated', text:'🏆 '+sub.player+' a terminé la quête : '+(q?q.title:'')+' !', time:Date.now() }];
+    }
+    await saveGame(game);
+    toast(status==='approved'?'Validé ! Points accordés ✨':'Soumission refusée');
+    renderAdminSubmissions();
+  }
+
+  // ====== SETTINGS ======
+  window.copyCode = function() {
+    navigator.clipboard.writeText(S.gameCode).then(()=>toast('Code copié ! 📋')).catch(()=>toast(S.gameCode));
+  }
+
+  window.leaveGame = function() {
+    if (confirm('Quitter la partie ?')) {
+      if (S.unsubscribe) S.unsubscribe();
+      clearSession();
+      S = { gameCode:null, myName:null, isCreator:false, currentQuestId:null, activeTab:'quests', unsubscribe:null, game:null };
+      document.getElementById('admin-fab').classList.remove('visible');
+      go('screen-home');
+    }
+  }
+</script>
+
+<style>
+  :root {
+    --sunset-top: #FF6B35;
+    --sunset-mid: #FF8C42;
+    --sunset-bot: #FFD166;
+    --white: #FFFFFF;
+    --off-white: #FFF8F0;
+    --card: #FFFFFF;
+    --text: #1A1A2E;
+    --text-soft: #6B6B8A;
+    --text-muted: #A0A0B8;
+    --border: rgba(0,0,0,0.07);
+    --radius-lg: 24px;
+    --radius-md: 16px;
+    --radius-sm: 12px;
+    --shadow-card: 0 2px 12px rgba(0,0,0,0.06);
+    --nav-h: 72px;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bot: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; overflow: hidden; font-family: -apple-system, 'Helvetica Neue', sans-serif; background: var(--off-white); color: var(--text); }
+  .screen { position: fixed; inset: 0; display: none; flex-direction: column; background: var(--off-white); overflow: hidden; }
+  .screen.active { display: flex; }
+  .scroll { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding-bottom: calc(var(--nav-h) + var(--safe-bot) + 16px); }
+  .scroll::-webkit-scrollbar { display: none; }
+  .grad-header { background: linear-gradient(160deg, var(--sunset-top) 0%, var(--sunset-mid) 55%, var(--sunset-bot) 100%); padding: calc(var(--safe-top) + 20px) 20px 28px; position: relative; overflow: hidden; flex-shrink: 0; }
+  .grad-header::after { content: ''; position: absolute; bottom: -1px; left: 0; right: 0; height: 28px; background: var(--off-white); border-radius: 28px 28px 0 0; }
+  .header-title { color: white; font-size: 22px; font-weight: 700; }
+  .header-sub { color: rgba(255,255,255,0.8); font-size: 14px; margin-top: 2px; }
+  .bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; height: calc(var(--nav-h) + var(--safe-bot)); background: white; border-top: 1px solid var(--border); display: none; align-items: flex-start; padding-top: 8px; z-index: 100; }
+  .bottom-nav.visible { display: flex; }
+  .nav-item { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; padding: 6px 0; transition: transform 0.15s; }
+  .nav-item:active { transform: scale(0.92); }
+  .nav-icon { width: 24px; height: 24px; }
+  .nav-label { font-size: 10px; color: var(--text-muted); font-weight: 500; }
+  .nav-item.active .nav-label { color: var(--sunset-top); }
+  .nav-item.active .nav-icon path, .nav-item.active .nav-icon circle, .nav-item.active .nav-icon polyline, .nav-item.active .nav-icon line, .nav-item.active .nav-icon rect { stroke: var(--sunset-top); }
+  .nav-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sunset-top); position: absolute; top: 2px; right: 8px; display: none; }
+  .nav-dot.visible { display: block; }
+  .btn { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 14px 20px; border-radius: var(--radius-md); border: none; font-size: 15px; font-weight: 600; cursor: pointer; width: 100%; transition: transform 0.15s, opacity 0.15s; font-family: inherit; }
+  .btn:active { transform: scale(0.97); opacity: 0.9; }
+  .btn-sunset { background: linear-gradient(135deg, var(--sunset-top), var(--sunset-bot)); color: white; box-shadow: 0 4px 16px rgba(255,107,53,0.35); }
+  .btn-white { background: white; color: var(--sunset-top); font-weight: 700; box-shadow: 0 4px 20px rgba(0,0,0,0.12); }
+  .btn-transparent { background: rgba(255,255,255,0.2); color: white; border: 1.5px solid rgba(255,255,255,0.5); }
+  input, textarea { width: 100%; padding: 13px 16px; border: 1.5px solid var(--border); border-radius: var(--radius-sm); font-size: 15px; font-family: inherit; background: white; color: var(--text); outline: none; transition: border-color 0.2s; }
+  input:focus, textarea:focus { border-color: var(--sunset-top); }
+  textarea { resize: none; min-height: 70px; }
+  .input-group { margin-bottom: 12px; }
+  .input-label { font-size: 12px; font-weight: 600; color: var(--text-soft); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .badge { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+  .badge-pts { background: linear-gradient(135deg, var(--sunset-top), var(--sunset-bot)); color: white; }
+  .badge-done { background: #E8F5E9; color: #2E7D32; }
+  .badge-pending { background: #FFF8E1; color: #F57F17; }
+  .toast { position: fixed; top: calc(var(--safe-top) + 60px); left: 50%; transform: translateX(-50%) translateY(-20px); background: var(--text); color: white; padding: 10px 20px; border-radius: 99px; font-size: 13px; font-weight: 500; z-index: 999; opacity: 0; transition: all 0.3s; white-space: nowrap; pointer-events: none; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #screen-splash { background: linear-gradient(160deg, var(--sunset-top) 0%, var(--sunset-mid) 50%, var(--sunset-bot) 100%); align-items: center; justify-content: center; }
+  .splash-logo { text-align: center; }
+  .splash-logo svg { width: 120px; height: 120px; margin-bottom: 16px; }
+  .splash-name { font-size: 36px; font-weight: 800; color: white; letter-spacing: -1px; }
+  .splash-tagline { font-size: 15px; color: rgba(255,255,255,0.8); margin-top: 4px; }
+  .splash-loader { margin: 48px auto 0; width: 36px; height: 36px; border: 3px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #screen-home { background: linear-gradient(160deg, var(--sunset-top) 0%, var(--sunset-mid) 50%, var(--sunset-bot) 100%); }
+  .home-content { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px 24px; gap: 16px; }
+  .home-logo-wrap { text-align: center; margin-bottom: 16px; }
+  .home-logo-wrap svg { width: 100px; height: 100px; }
+  .home-title { font-size: 34px; font-weight: 800; color: white; letter-spacing: -1px; }
+  .home-sub { font-size: 15px; color: rgba(255,255,255,0.8); text-align: center; }
+  .home-btn-wrap { width: 100%; display: flex; flex-direction: column; gap: 12px; }
+  .simple-header { background: linear-gradient(160deg, var(--sunset-top), var(--sunset-mid)); padding: calc(var(--safe-top) + 16px) 20px 32px; flex-shrink: 0; position: relative; }
+  .simple-header::after { content: ''; position: absolute; bottom: -1px; left: 0; right: 0; height: 24px; background: var(--off-white); border-radius: 24px 24px 0 0; }
+  .back-btn { background: rgba(255,255,255,0.25); border: none; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; margin-bottom: 12px; }
+  .simple-header h1 { color: white; font-size: 24px; font-weight: 700; }
+  .simple-header p { color: rgba(255,255,255,0.8); font-size: 14px; margin-top: 2px; }
+  .form-area { padding: 20px 16px; }
+  .quest-card { background: white; border-radius: var(--radius-md); box-shadow: var(--shadow-card); margin: 0 16px 12px; padding: 16px; display: flex; align-items: center; gap: 14px; cursor: pointer; transition: transform 0.15s; }
+  .quest-card:active { transform: scale(0.98); }
+  .quest-icon-wrap { width: 48px; height: 48px; border-radius: 14px; background: linear-gradient(135deg, var(--sunset-top), var(--sunset-bot)); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .quest-icon-wrap.done { background: #E8F5E9; }
+  .quest-body { flex: 1; min-width: 0; }
+  .quest-title { font-size: 15px; font-weight: 600; }
+  .quest-desc { font-size: 13px; color: var(--text-soft); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .quest-right { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
+  .chat-area { padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .msg-row { display: flex; align-items: flex-end; gap: 8px; }
+  .msg-row.me { flex-direction: row-reverse; }
+  .msg-avatar { width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg, var(--sunset-top), var(--sunset-bot)); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: white; flex-shrink: 0; }
+  .msg-bubble { max-width: 72%; padding: 10px 14px; border-radius: 18px; font-size: 14px; line-height: 1.4; word-break: break-word; }
+  .msg-row.me .msg-bubble { background: linear-gradient(135deg, var(--sunset-top), var(--sunset-mid)); color: white; border-bottom-right-radius: 4px; }
+  .msg-row.other .msg-bubble { background: white; color: var(--text); border-bottom-left-radius: 4px; box-shadow: var(--shadow-card); }
+  .msg-sender { font-size: 11px; color: var(--text-muted); margin-bottom: 3px; }
+  .msg-time { font-size: 10px; color: var(--text-muted); margin-top: 3px; }
+  .msg-notif { text-align: center; background: linear-gradient(135deg, rgba(255,107,53,0.1), rgba(255,209,102,0.1)); border-radius: 12px; padding: 8px 14px; font-size: 12px; color: var(--sunset-top); font-weight: 600; margin: 4px 0; }
+  .chat-input-bar { position: fixed; bottom: calc(var(--nav-h) + var(--safe-bot)); left: 0; right: 0; background: white; border-top: 1px solid var(--border); padding: 10px 12px; display: flex; gap: 8px; align-items: flex-end; z-index: 99; }
+  .chat-input-bar input { flex: 1; border-radius: 22px; padding: 10px 16px; font-size: 14px; }
+  .send-btn { width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg, var(--sunset-top), var(--sunset-bot)); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .photo-msg-img { max-width: 100%; border-radius: 14px; margin-bottom: 6px; display: block; }
+  .reactions-bar { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+  .reaction-btn { background: rgba(0,0,0,0.05); border: none; border-radius: 99px; padding: 2px 8px; font-size: 13px; cursor: pointer; }
+  .reaction-count { font-size: 11px; color: var(--text-soft); }
+  .lb-row { display: flex; align-items: center; gap: 14px; padding: 14px 16px; background: white; margin: 0 16px 10px; border-radius: var(--radius-md); box-shadow: var(--shadow-card); }
+  .lb-rank { font-size: 22px; width: 32px; text-align: center; flex-shrink: 0; }
+  .lb-avatar { width: 44px; height: 44px; border-radius: 50%; background: linear-gradient(135deg, var(--sunset-top), var(--sunset-bot)); display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; color: white; flex-shrink: 0; }
+  .lb-info { flex: 1; }
+  .lb-name { font-size: 15px; font-weight: 600; }
+  .lb-sub { font-size: 12px; color: var(--text-soft); margin-top: 1px; }
+  .lb-score { font-size: 18px; font-weight: 700; color: var(--sunset-top); }
+  .lb-row.top { background: linear-gradient(135deg, rgba(255,107,53,0.08), rgba(255,209,102,0.08)); border: 1px solid rgba(255,107,53,0.2); }
+  .profile-card { background: white; border-radius: var(--radius-md); box-shadow: var(--shadow-card); margin: 0 16px 12px; padding: 16px; display: flex; align-items: center; gap: 14px; }
+  .profile-avatar { width: 52px; height: 52px; border-radius: 50%; background: linear-gradient(135deg, var(--sunset-top), var(--sunset-bot)); display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 700; color: white; flex-shrink: 0; }
+  .profile-name { font-size: 16px; font-weight: 600; }
+  .profile-sub { font-size: 13px; color: var(--text-soft); margin-top: 2px; }
+  .profile-pts { font-size: 15px; font-weight: 700; color: var(--sunset-top); margin-left: auto; }
+  .settings-item { display: flex; align-items: center; gap: 14px; padding: 16px; cursor: pointer; }
+  .settings-item + .settings-item { border-top: 1px solid var(--border); }
+  .settings-icon { width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .settings-label { flex: 1; font-size: 15px; font-weight: 500; }
+  .settings-val { font-size: 13px; color: var(--text-soft); }
+  .upload-zone { border: 2px dashed rgba(255,107,53,0.3); border-radius: var(--radius-md); padding: 32px; text-align: center; cursor: pointer; background: rgba(255,107,53,0.03); }
+  .upload-zone p { font-size: 14px; color: var(--text-soft); margin-top: 8px; }
+  .preview-img { width: 100%; border-radius: var(--radius-sm); max-height: 260px; object-fit: cover; display: none; margin-top: 10px; }
+  .code-box { background: linear-gradient(135deg, var(--sunset-top), var(--sunset-bot)); border-radius: var(--radius-lg); padding: 24px; text-align: center; margin: 16px; }
+  .code-label { color: rgba(255,255,255,0.8); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+  .code-val { color: white; font-size: 42px; font-weight: 800; letter-spacing: 8px; margin: 8px 0; }
+  .code-hint { color: rgba(255,255,255,0.7); font-size: 13px; }
+  .section-title { font-size: 13px; font-weight: 700; color: var(--text-soft); text-transform: uppercase; letter-spacing: 0.8px; padding: 16px 16px 8px; }
+  .empty { text-align: center; padding: 48px 24px; }
+  .empty p { font-size: 15px; color: var(--text-muted); margin-top: 8px; }
+  .card { background: var(--card); border-radius: var(--radius-md); box-shadow: var(--shadow-card); margin: 0 16px 12px; overflow: hidden; }
+  .admin-fab { position: fixed; bottom: calc(var(--nav-h) + var(--safe-bot) + 16px); right: 20px; width: 52px; height: 52px; border-radius: 50%; background: linear-gradient(135deg, var(--sunset-top), var(--sunset-bot)); box-shadow: 0 4px 16px rgba(255,107,53,0.4); display: none; align-items: center; justify-content: center; cursor: pointer; z-index: 90; border: none; }
+  .admin-fab.visible { display: flex; }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none; align-items: flex-end; z-index: 200; }
+  .modal-overlay.open { display: flex; }
+  .modal-sheet { background: var(--off-white); border-radius: 28px 28px 0 0; width: 100%; padding: 12px 0 calc(var(--safe-bot) + 24px); max-height: 90vh; overflow-y: auto; animation: slideUp 0.3s ease; }
+  @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  .modal-handle { width: 40px; height: 4px; background: var(--border); border-radius: 2px; margin: 0 auto 16px; }
+  .modal-title { font-size: 18px; font-weight: 700; padding: 0 20px 16px; }
+  .review-card { background: white; border-radius: var(--radius-md); margin: 0 16px 12px; overflow: hidden; box-shadow: var(--shadow-card); }
+  .review-header { padding: 12px 16px; display: flex; align-items: center; gap: 10px; }
+  .review-img { width: 100%; max-height: 220px; object-fit: cover; }
+  .review-actions { display: flex; gap: 10px; padding: 12px 16px; }
+  .btn-approve { flex: 1; padding: 11px; border-radius: var(--radius-sm); background: #E8F5E9; color: #2E7D32; border: none; font-weight: 600; font-size: 14px; cursor: pointer; font-family: inherit; }
+  .btn-reject { flex: 1; padding: 11px; border-radius: var(--radius-sm); background: #FFEBEE; color: #C62828; border: none; font-weight: 600; font-size: 14px; cursor: pointer; font-family: inherit; }
+</style>
+</head>
+<body>
+<div class="toast" id="toast"></div>
+
+<!-- SPLASH -->
+<div class="screen active" id="screen-splash">
+  <div class="splash-logo">
+    <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="60" cy="60" r="58" fill="rgba(255,255,255,0.15)" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+      <circle cx="60" cy="52" r="16" stroke="white" stroke-width="2.5" fill="none"/>
+      <line x1="22" y1="72" x2="98" y2="72" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+      <path d="M60 72 Q57 62 55 50" stroke="white" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+      <path d="M55 50 Q42 40 36 44" stroke="white" stroke-width="2" stroke-linecap="round" fill="none"/>
+      <path d="M55 50 Q50 36 56 30" stroke="white" stroke-width="2" stroke-linecap="round" fill="none"/>
+      <path d="M55 50 Q62 36 70 38" stroke="white" stroke-width="2" stroke-linecap="round" fill="none"/>
+      <path d="M55 50 Q64 44 72 46" stroke="white" stroke-width="2" stroke-linecap="round" fill="none"/>
+      <path d="M24 80 Q34 77 44 80 Q54 83 64 80 Q74 77 84 80 Q90 82 96 80" stroke="white" stroke-width="1.5" stroke-linecap="round" fill="none" opacity="0.6"/>
+    </svg>
+    <p class="splash-name">SummerQuest</p>
+    <p class="splash-tagline">Vivez l'été ensemble 🌅</p>
+    <div class="splash-loader"></div>
+  </div>
+</div>
+
+<!-- HOME -->
+<div class="screen" id="screen-home">
+  <div class="home-content">
+    <div class="home-logo-wrap">
+      <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="60" cy="60" r="58" fill="rgba(255,255,255,0.15)" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+        <circle cx="60" cy="52" r="16" stroke="white" stroke-width="2.5" fill="none"/>
+        <line x1="22" y1="72" x2="98" y2="72" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+        <path d="M60 72 Q57 62 55 50" stroke="white" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+        <path d="M55 50 Q42 40 36 44" stroke="white" stroke-width="2" stroke-linecap="round" fill="none"/>
+        <path d="M55 50 Q50 36 56 30" stroke="white" stroke-width="2" stroke-linecap="round" fill="none"/>
+        <path d="M55 50 Q62 36 70 38" stroke="white" stroke-width="2" stroke-linecap="round" fill="none"/>
+        <path d="M55 50 Q64 44 72 46" stroke="white" stroke-width="2" stroke-linecap="round" fill="none"/>
+        <path d="M24 80 Q34 77 44 80 Q54 83 64 80 Q74 77 84 80 Q90 82 96 80" stroke="white" stroke-width="1.5" stroke-linecap="round" fill="none" opacity="0.6"/>
+      </svg>
+      <h1 class="home-title">SummerQuest</h1>
+      <p class="home-sub">Vivez l'été ensemble,<br>même à distance 🌅</p>
+    </div>
+    <div class="home-btn-wrap">
+      <button class="btn btn-white" onclick="go('screen-create')">✨ Créer une partie</button>
+      <button class="btn btn-transparent" onclick="go('screen-join')">🚀 Rejoindre une partie</button>
+    </div>
+  </div>
+</div>
+
+<!-- CREATE -->
+<div class="screen" id="screen-create">
+  <div class="simple-header">
+    <button class="back-btn" onclick="go('screen-home')"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+    <h1>Nouvelle partie</h1>
+    <p>Crée ta partie et invite tes amis</p>
+  </div>
+  <div class="scroll" style="padding-bottom:24px">
+    <div class="form-area">
+      <div class="input-group"><div class="input-label">Nom de la partie</div><input type="text" id="c-gamename" placeholder="Ex : Vacances Bretagne 🌊"></div>
+      <div class="input-group"><div class="input-label">Ton prénom</div><input type="text" id="c-username" placeholder="Ex : Marie"></div>
+      <div style="margin-top:8px"><button class="btn btn-sunset" onclick="createGame()">Créer la partie ✨</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- JOIN -->
+<div class="screen" id="screen-join">
+  <div class="simple-header">
+    <button class="back-btn" onclick="go('screen-home')"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+    <h1>Rejoindre</h1>
+    <p>Entre le code partagé par ton ami</p>
+  </div>
+  <div class="scroll" style="padding-bottom:24px">
+    <div class="form-area">
+      <div class="input-group"><div class="input-label">Code de partie</div><input type="text" id="j-code" placeholder="ABC123" style="text-transform:uppercase;letter-spacing:4px;font-size:22px;font-weight:700;text-align:center" maxlength="6"></div>
+      <div class="input-group"><div class="input-label">Ton prénom</div><input type="text" id="j-username" placeholder="Ex : Thomas"></div>
+      <div style="margin-top:8px"><button class="btn btn-sunset" onclick="joinGame()">Rejoindre 🚀</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- GAME -->
+<div class="screen" id="screen-game">
+  <!-- QUESTS -->
+  <div class="tab-view active" id="tab-quests" style="display:flex;flex-direction:column;height:100%">
+    <div class="grad-header"><div class="header-title" id="g-game-title">Quêtes</div><div class="header-sub" id="g-quest-sub">Relève les défis !</div></div>
+    <div class="scroll"><div class="section-title">Quêtes disponibles</div><div id="quests-list"></div></div>
+  </div>
+  <!-- CHAT -->
+  <div class="tab-view" id="tab-chat" style="display:none;flex-direction:column;height:100%">
+    <div class="grad-header"><div class="header-title">Discussion</div><div class="header-sub">Avec tes amis</div></div>
+    <div class="scroll" id="chat-scroll" style="padding-bottom:calc(var(--nav-h) + var(--safe-bot) + 64px)"><div class="chat-area" id="chat-messages"></div></div>
+    <div class="chat-input-bar">
+      <input type="text" id="chat-input" placeholder="Un message..." onkeydown="if(event.key==='Enter')sendMsg()">
+      <button class="send-btn" onclick="sendMsg()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+    </div>
+  </div>
+  <!-- LEADERBOARD -->
+  <div class="tab-view" id="tab-leaderboard" style="display:none;flex-direction:column;height:100%">
+    <div class="grad-header"><div class="header-title">Classement</div><div class="header-sub">Qui mène la course ? 🏆</div></div>
+    <div class="scroll"><div class="section-title" style="margin-top:8px">Scores</div><div id="lb-list"></div></div>
+  </div>
+  <!-- PROFILES -->
+  <div class="tab-view" id="tab-profiles" style="display:none;flex-direction:column;height:100%">
+    <div class="grad-header"><div class="header-title">Joueurs</div><div class="header-sub">Participants</div></div>
+    <div class="scroll"><div class="section-title" style="margin-top:8px">Participants</div><div id="profiles-list"></div></div>
+  </div>
+  <!-- SETTINGS -->
+  <div class="tab-view" id="tab-settings" style="display:none;flex-direction:column;height:100%">
+    <div class="grad-header"><div class="header-title">Paramètres</div><div class="header-sub">Infos & options</div></div>
+    <div class="scroll" style="padding-bottom:calc(var(--nav-h) + var(--safe-bot) + 24px)">
+      <div class="code-box"><div class="code-label">Code de la partie</div><div class="code-val" id="s-code">—</div><div class="code-hint">Partage ce code avec tes amis</div></div>
+      <div class="card">
+        <div class="settings-item" onclick="copyCode()"><div class="settings-icon" style="background:#FFF3E0"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FF6B35" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></div><span class="settings-label">Copier le code</span><span style="color:var(--text-muted)">›</span></div>
+        <div class="settings-item"><div class="settings-icon" style="background:#FFF3E0"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FF6B35" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div><span class="settings-label">Mon prénom</span><span class="settings-val" id="s-myname">—</span></div>
+        <div class="settings-item"><div class="settings-icon" style="background:#FFF3E0"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FF6B35" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/></svg></div><span class="settings-label">Partie</span><span class="settings-val" id="s-gamename">—</span></div>
+      </div>
+      <div class="card">
+        <div class="settings-item" onclick="leaveGame()"><div class="settings-icon" style="background:#FFEBEE"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#C62828" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></div><span class="settings-label" style="color:#C62828">Quitter la partie</span><span style="color:#C62828">›</span></div>
+      </div>
+      <div style="text-align:center;padding:24px;color:var(--text-muted);font-size:12px">SummerQuest · Photos privées, visibles uniquement par les membres</div>
+    </div>
+  </div>
+
+  <!-- BOTTOM NAV -->
+  <nav class="bottom-nav visible">
+    <div class="nav-item active" onclick="switchTab('quests')" id="nav-quests">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="#A0A0B8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      <span class="nav-label">Quêtes</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('chat')" id="nav-chat" style="position:relative">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="#A0A0B8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <div class="nav-dot" id="chat-dot" style="position:absolute;top:2px;right:8px"></div>
+      <span class="nav-label">Chat</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('leaderboard')" id="nav-leaderboard">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="#A0A0B8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      <span class="nav-label">Classement</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('profiles')" id="nav-profiles">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="#A0A0B8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      <span class="nav-label">Joueurs</span>
+    </div>
+    <div class="nav-item" onclick="switchTab('settings')" id="nav-settings">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="#A0A0B8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93A10 10 0 0 0 4.93 19.07M4.93 4.93a10 10 0 0 1 14.14 14.14"/></svg>
+      <span class="nav-label">Paramètres</span>
+    </div>
+  </nav>
+</div>
+
+<!-- ADMIN FAB -->
+<button class="admin-fab" id="admin-fab" onclick="openAdminModal()">
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+</button>
+
+<!-- ADMIN MODAL -->
+<div class="modal-overlay" id="admin-modal" onclick="closeAdminOnBg(event)">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <div class="modal-title">✏️ Gérer la partie</div>
+    <div style="padding:0 16px">
+      <div class="input-group"><div class="input-label">Titre de la quête</div><input type="text" id="a-quest-title" placeholder="Ex : Photo d'un coucher de soleil"></div>
+      <div class="input-group"><div class="input-label">Description</div><textarea id="a-quest-desc" placeholder="Décris le défi..."></textarea></div>
+      <div class="input-group"><div class="input-label">Points</div><input type="number" id="a-quest-pts" value="10" min="1" max="500" style="width:100px"></div>
+      <button class="btn btn-sunset" onclick="addQuest()" style="margin-bottom:16px">Ajouter la quête ✨</button>
+    </div>
+    <div id="admin-submissions-title" class="section-title" style="display:none">Soumissions à valider</div>
+    <div id="admin-submissions"></div>
+  </div>
+</div>
+
+<!-- SUBMIT MODAL -->
+<div class="modal-overlay" id="submit-modal" onclick="closeSubmitOnBg(event)">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <div class="modal-title" id="submit-modal-title">📸 Soumettre une photo</div>
+    <div style="padding:0 16px 16px">
+      <div class="upload-zone" onclick="document.getElementById('photo-file').click()">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#FF6B35" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        <p>Appuie pour choisir une photo</p>
+      </div>
+      <input type="file" id="photo-file" accept="image/*" style="display:none" onchange="previewImg(event)">
+      <img id="preview-img" class="preview-img">
+      <div class="input-group" style="margin-top:12px"><div class="input-label">Message (optionnel)</div><input type="text" id="submit-msg" placeholder="Où as-tu pris cette photo ?"></div>
+      <button class="btn btn-sunset" onclick="submitPhoto()">Envoyer 📸</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>
