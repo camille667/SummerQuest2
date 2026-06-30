@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FF6B35"/>
+      <stop offset="100%" stop-color="#FFD166"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- Sun -->
+  <circle cx="256" cy="210" r="60" stroke="white" stroke-width="10" fill="none"/>
+  <!-- Horizon -->
+  <line x1="80" y1="300" x2="432" y2="300" stroke="white" stroke-width="10" stroke-linecap="round"/>
+  <!-- Palm trunk -->
+  <path d="M256 300 Q248 268 240 210" stroke="white" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <!-- Palm leaves -->
+  <path d="M240 210 Q190 178 168 190" stroke="white" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <path d="M240 210 Q222 158 246 134" stroke="white" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <path d="M240 210 Q268 158 302 166" stroke="white" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <path d="M240 210 Q272 186 306 192" stroke="white" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <!-- Water -->
+  <path d="M90 336 Q126 324 162 336 Q198 348 234 336 Q270 324 306 336 Q342 348 378 336 Q400 328 422 336" stroke="white" stroke-width="6" stroke-linecap="round" fill="none" opacity="0.6"/>
+</svg>
